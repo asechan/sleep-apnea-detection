@@ -1,4 +1,4 @@
-# 🫁 Sleep Apnea Detection from Audio using Deep Learning
+# Sleep Apnea Detection from Audio using Deep Learning
 
 End-to-end deep learning system for detecting sleep apnea events from overnight breathing audio recordings using CNNs and mel-spectrogram features.
 
@@ -6,7 +6,7 @@ This project processes raw sleep audio into time-aligned clinical predictions an
 
 ---
 
-## 🚀 Features
+## Features
 
 - Raw audio → Mel Spectrogram → CNN pipeline
 - Subject-independent training and validation
@@ -18,7 +18,7 @@ This project processes raw sleep audio into time-aligned clinical predictions an
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 sleep-apnea/
 ├── src/
 │   ├── data_sync_apsaa.py
@@ -36,7 +36,7 @@ sleep-apnea/
 └── README.md
 ---
 
-## 🧪 Dataset
+## Dataset
 
 This project is designed for the **APSAA Sleep Audio Dataset**.
 
@@ -45,7 +45,7 @@ Download it separately and place it in: data/raw/
 
 ---
 
-## ⚙️ Setup
+## Setup
 
 ### 1. Create Environment
 ```bash
@@ -70,22 +70,22 @@ python src/train_cnn.py --epochs 25
 Run Inference
 python src/infer_apnea.py your_audio.wav
 
-📊 Output Example
+Output Example
 ===== SLEEP APNEA REPORT =====
 Total sleep time: 7.19 hours
 Detected events: 42
 AHI: 5.83
 Severity: Mild
 
-🧠 Model
+Model
 	•	Architecture: CNN on Mel-Spectrograms
 	•	Input: 64xT Mel Features
 	•	Output: Binary apnea probability
 	•	Threshold tuned via validation F1-score
-💻 Hardware Support
+Hardware Support
 	•	CPU
 	•	Apple Silicon (MPS)
 	•	CUDA (optional)
-📜 License
+License
 
 MIT License
