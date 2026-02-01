@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
 """
-epoch_labeler.py (final robust version)
+Turn annotations and audio into fixed-length labeled epochs.
 
-- Parses HH:MM:SS annotation times
-- Loads sync_output.mat and auto-detects whether to apply +time_delay or -time_delay
-- Robust numeric coercion for manifest values (lists/tuples/ndarrays -> scalars)
-- Epochs audio into fixed-length windows (default 30s) and labels epochs
-- POSITIVE labels: Apnea + Hypopnea only (desaturation NOT considered positive)
-
-Usage:
-    python src/epoch_labeler.py --manifest data/manifest_apsaa.csv --processed_dir data/processed --epoch_sec 30 --overlap 0.0
+This handles HH:MM:SS timestamps, sync .mat files, and defensive numeric parsing. Only apnea and hypopnea are treated as positive events.
 """
 import argparse
 from pathlib import Path
@@ -22,7 +15,7 @@ from tqdm import tqdm
 import math
 import warnings
 
-# ---------- small helper: safe numeric coercion ----------
+# Numeric coercion helpers
 import numpy as _np
 
 def _coerce_to_scalar(val):
@@ -72,11 +65,11 @@ def to_number(val):
     """Alias to coercion - returns float or None."""
     return _coerce_to_scalar(val)
 
-# ---------- config ----------
+# Config
 # POSITIVE: only apnea + hypopnea (user requested)
 POSITIVE_KEYWORDS = ["apnea", "apnoea", "hypopnea", "hypopnoea"]
 
-# ---------- Helpers ----------
+# Helpers
 
 def safe_load_mat(path: Path):
     """Load .mat and convert small arrays to python scalars/lists where reasonable."""
@@ -264,7 +257,7 @@ def is_positive_event(label: str) -> bool:
             return True
     return False
 
-# ---------- Main processing (safe) ----------
+# Main processing
 
 def create_epochs_and_labels(subject_meta: dict, processed_dir: str, epoch_sec: float = 30.0, overlap: float = 0.0):
     subj = subject_meta.get("subject", "unknown")

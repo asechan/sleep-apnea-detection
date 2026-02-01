@@ -7,9 +7,9 @@ import torch.nn.functional as F
 
 class SimpleCNN(nn.Module):
     """
-    Simple CNN for spectrogram classification.
-    Input: (B, 1, n_mels, T)
-    Output: logits (B,)
+    A compact convolutional network for mel-spectrogram inputs.
+    Expects input shape (B, 1, n_mels, T).
+    Produces one logit per example (shape: (B,)).
     """
     def __init__(self, in_channels: int = 1, n_classes: int = 1, base_filters: int = 32, dropout: float = 0.3):
         super().__init__()
@@ -35,11 +35,11 @@ class SimpleCNN(nn.Module):
         self.fc = nn.Linear(base_filters * 4, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 1, n_mels, T)
+        # expects input shape (batch, channel, n_mels, time)
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)  # (B, C, 1, 1)
         x = x.view(x.size(0), -1)
         x = self.dropout(x)
-        logits = self.fc(x).squeeze(dim=-1)  # (B,)
+        logits = self.fc(x).squeeze(dim=-1)  # returns (B,) logits
         return logits

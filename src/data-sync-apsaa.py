@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
 """
-data_sync_apsaa.py
+Walk the raw subject folders and assemble a manifest and per-subject metadata.
 
-APSAA-specific manifest + alignment builder.
-
-Assumptions:
- - Raw dataset layout: data/raw/<subject_id>/* (one folder per subject)
- - Inside each subject folder there is:
-     - one audio file (*.wav)
-     - one Annotations CSV (name includes 'Annotation' or 'Annotations')
-     - one sync_output.mat
-     - other sensor CSVs (ignored here)
- - The script will create:
-     - data/manifest_apsaa.csv  (one row per subject)
-     - data/processed/<subject>/metadata.json
-     - data/diagnostics_apsaa.json
-
-Usage:
-    python src/data_sync_apsaa.py --raw_dir data/raw --out_csv data/manifest_apsaa.csv --diag data/diagnostics_apsaa.json
+Finds audio files, annotation CSVs, and sync .mat files and writes:
+ - data/manifest_apsaa.csv
+ - data/diagnostics_apsaa.json
+ - data/processed/<subject>/metadata.json
 """
 
 import argparse
@@ -32,7 +20,7 @@ from scipy.io import loadmat
 from tqdm import tqdm
 import re
 
-# ---------- Helpers ----------
+# Helpers
 
 AUDIO_EXTS = [".wav", ".flac", ".m4a", ".mp3"]
 

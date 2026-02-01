@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
-make_dataset.py
+Build a memmapped dataset of log-mel spectrograms from epoch files.
 
-Creates a dataset of log-mel spectrograms from epoch files produced by epoch_labeler.py.
+Outputs (data/features):
+ - X.npy: (N,1,n_mels,T) float32 (normalized with training stats)
+ - y.npy: (N,) int8
+ - meta.json: dataset metadata and splits
 
-Outputs (into data/features/):
- - X.npy        : memmap float32 (N, 1, n_mels, T)  -- normalized using training stats
- - y.npy        : int8 (N,)
- - meta.json    : contains n_mels, n_fft, hop_length, sr, epoch_sec, splits (train/val/test indices), mean/std
-
-Notes:
- - Uses memmap to avoid huge RAM usage.
- - Two-pass approach:
-    1) compute & store raw mel -> memmap, and compute running mean/std over TRAIN set only
-    2) normalize entire memmap in-place with computed mean/std
- - Default audio/mel params chosen by you:
-    sr=4000, n_fft=512, hop_length=128, n_mels=64
+Two-pass approach: compute raw mels (pass 1), build train mean/std, then normalize in-place (pass 2).
 """
 from pathlib import Path
 import numpy as np
@@ -28,7 +20,7 @@ import math
 import random
 from typing import List, Tuple
 
-# ---------------- Utility: running mean/std (Welford) ----------------
+# RunningStats: Welford running mean/std utility
 class RunningStats:
     def __init__(self):
         self.n = 0
@@ -65,14 +57,14 @@ def build_subject_splits(subject_dirs, seed=42, ratios=(0.8, 0.1, 0.1)):
 
     return train_subs, val_subs, test_subs
 
-# ---------------- Mel computation ----------------
+# Mel computation
 def compute_log_mel(epoch_wave: np.ndarray, sr: int, n_mels: int, n_fft: int, hop_length: int) -> np.ndarray:
     # Returns float32 (n_mels, T) (log-power dB)
     S = librosa.feature.melspectrogram(y=epoch_wave, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, power=2.0)
     S_db = librosa.power_to_db(S, ref=np.max)
     return S_db.astype(np.float32)
 
-# ---------------- Main workflow ----------------
+# Main workflow
 def find_subject_dirs(processed_dir: Path) -> List[Path]:
     subs = [p for p in sorted(processed_dir.iterdir()) if p.is_dir()]
     return subs

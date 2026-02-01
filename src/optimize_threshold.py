@@ -7,11 +7,10 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 from tqdm import tqdm
 import sys
 
-# -------- Add project root to PYTHONPATH --------
+# make repo root importable
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# ----------------------------------------------
 
 from models.cnn import SimpleCNN
 from train_cnn import MemmapDataset, collate_fn

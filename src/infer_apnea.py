@@ -7,16 +7,15 @@ from pathlib import Path
 import soundfile as sf
 import librosa
 
-# -------- Add project root --------
+# add project root to python path so local modules import cleanly
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# ---------------------------------
 
 from models.cnn import SimpleCNN
 
 
-# Must match training config
+# these constants should match the training setup
 SR = 4000
 EPOCH_SEC = 30
 N_MELS = 64

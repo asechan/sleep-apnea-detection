@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # src/train_cnn.py
 """
-Train a CNN on spectrogram memmap dataset produced by src/make_dataset.py
+Train a convolutional model on the memmapped spectrogram dataset.
 
-Outputs:
- - checkpoints/best.pt  (best val F1)
- - checkpoints/last.pt  (last epoch)
+Saves:
+ - checkpoints/best.pt  -- model with best validation F1
+ - checkpoints/last.pt  -- most recent checkpoint
 """
 
 #!/usr/bin/env python3
@@ -13,14 +13,13 @@ Outputs:
 import sys
 from pathlib import Path
 
-# -------- Add project root to PYTHONPATH (sleep-apnea/) --------
+# make repo root importable for local modules
 ROOT = Path(__file__).resolve().parents[1]
 print("DEBUG ROOT:", ROOT)
 print("DEBUG models exists:", (ROOT / "models").exists())
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# -------------------------------------------------------------
 
 import argparse
 import json
@@ -36,7 +35,7 @@ import os
 from typing import List
 
 from models.cnn import SimpleCNN
-# -------------------- Dataset --------------------
+# Dataset: memmap wrapper
 class MemmapDataset(Dataset):
     """
     Memory-mapped dataset wrapper for X.npy (N,1,n_mels,T) and y.npy (N,)
@@ -63,7 +62,7 @@ class MemmapDataset(Dataset):
         # convert to torch tensors in training loop for performance reasons
         return mel, label
 
-# -------------------- Helpers --------------------
+# Helper utilities
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -76,7 +75,7 @@ def collate_fn(batch):
     X = torch.stack(xs, dim=0)  # (B,1,n_mels,T)
     return X, ys
 
-# -------------------- Training / Eval loops --------------------
+# Training & validation loops
 def train_one_epoch(model, loader, optimizer, device, scaler, criterion, clip_grad=None):
     model.train()
     preds_all = []
@@ -144,7 +143,7 @@ def validate(model, loader, device, criterion):
         auc = float("nan")
     return loss_avg, acc, f1, auc
 
-# -------------------- Main --------------------
+# Main training entrypoint
 def main(args):
     set_seed(args.seed)
     # -------- Device selection: CUDA > MPS > CPU --------
