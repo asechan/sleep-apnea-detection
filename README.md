@@ -85,14 +85,15 @@ AHI: 5.83
 Severity: Mild
 ```
 ### Model
-	•	Architecture: CNN on Mel-Spectrograms
-	•	Input: 64xT Mel Features
-	•	Output: Binary apnea probability
-	•	Threshold tuned via validation F1-score
+- Architecture: CNN on Mel-Spectrograms
+- Input: 64xT Mel Features
+- Output: Binary apnea probability
+- Threshold tuned via validation F1-score
 ### Hardware Support
-	•	CPU
-	•	Apple Silicon (MPS)
-	•	CUDA (optional)
+- CPU
+- Apple Silicon (MPS)
+- CUDA (optional)
+  
 License
 
 MIT License
