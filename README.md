@@ -46,42 +46,50 @@ Download it separately and place it in: data/raw/
 ---
 
 ## Setup
+
+### Create Environment
 ```bash
-1. Create Environment
 python3 -m venv .venv
 source .venv/bin/activate
-
-2. Install Dependencies
+```
+### Install Dependencies
+```bash
 pip install -r requirements.txt
-
-Sync Dataset
+```
+### Sync Dataset
+```bash
 python src/data_sync_apsaa.py --raw_dir data/raw --out_csv data/manifest_apsaa.csv
-
-Generate Epochs & Labels
+```
+### Generate Epochs & Labels
+```bash
 python src/epoch_labeler.py
-
-Extract Features
+```
+### Extract Features
+```bash
 python src/make_dataset.py
-
-Train Model
+```
+### Train Model
+```bash
 python src/train_cnn.py --epochs 25
-
-Run Inference
+```
+### Run Inference
+```bash
 python src/infer_apnea.py your_audio.wav
-
-Output Example
+```
+### Output Example
+```bash
 ===== SLEEP APNEA REPORT =====
 Total sleep time: 7.19 hours
 Detected events: 42
 AHI: 5.83
 Severity: Mild
-
-Model
+```
+### Model
 	•	Architecture: CNN on Mel-Spectrograms
 	•	Input: 64xT Mel Features
 	•	Output: Binary apnea probability
 	•	Threshold tuned via validation F1-score
-Hardware Support
+### Hardware Support
 	•	CPU
 	•	Apple Silicon (MPS)
 	•	CUDA (optional)
