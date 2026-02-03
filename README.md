@@ -18,7 +18,9 @@ This project processes raw sleep audio into time-aligned clinical predictions an
 
 ---
 
-## Project Structure
+## 📁 Project Structure
+
+```text
 sleep-apnea/
 ├── src/
 │   ├── data_sync_apsaa.py
@@ -26,15 +28,18 @@ sleep-apnea/
 │   ├── make_dataset.py
 │   ├── train_cnn.py
 │   └── infer_apnea.py
+│
 ├── models/
 │   └── cnn.py
+│
 ├── data/
-│   ├── raw/        # Not tracked (APSAA dataset)
-│   ├── processed/ # Generated epochs + labels
-│   └── features/  # Mel spectrograms
-├── checkpoints/   # Saved models (not tracked)
+│   ├── raw/         # Not tracked (APSAA dataset)
+│   ├── processed/  # Generated epochs + labels
+│   └── features/   # Mel spectrograms
+│
+├── checkpoints/    # Saved models (not tracked)
 └── README.md
----
+```
 
 ## Dataset
 
