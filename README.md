@@ -46,9 +46,8 @@ Download it separately and place it in: data/raw/
 ---
 
 ## Setup
-
-1. Create Environment
 ```bash
+1. Create Environment
 python3 -m venv .venv
 source .venv/bin/activate
 
