@@ -15,8 +15,6 @@ from pathlib import Path
 
 # make repo root importable for local modules
 ROOT = Path(__file__).resolve().parents[1]
-print("DEBUG ROOT:", ROOT)
-print("DEBUG models exists:", (ROOT / "models").exists())
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -35,15 +33,15 @@ import os
 from typing import List
 
 from models.cnn import SimpleCNN
+from artifacts import validate_features
 # Dataset: memmap wrapper
 class MemmapDataset(Dataset):
     """
     Memory-mapped dataset wrapper for X.npy (N,1,n_mels,T) and y.npy (N,)
     """
     def __init__(self, features_path: str, labels_path: str, indices: List[int], dtype=np.float32):
+        self.meta = validate_features(Path(features_path).parent)
         self.X = np.memmap(features_path, mode='r', dtype='float32')
-        # reshape based on meta.json is required; we'll infer shape from meta passed externally
-        self.meta = json.load(open(str(Path(features_path).parent / "meta.json")))
         total = int(self.meta["total_epochs"])
         n_mels = int(self.meta["n_mels"])
         T = int(self.meta["T"])
@@ -145,6 +143,9 @@ def validate(model, loader, device, criterion):
 
 # Main training entrypoint
 def main(args):
+    checkpoint_dir = Path(args.checkpoint_dir)
+    if any((checkpoint_dir / name).exists() for name in ("best.pt", "last.pt")):
+        raise ValueError("Checkpoint outputs exist; choose a fresh --checkpoint_dir")
     set_seed(args.seed)
     # -------- Device selection: CUDA > MPS > CPU --------
     if not args.cpu:
@@ -162,24 +163,22 @@ def main(args):
     features_dir = Path(args.features_dir)
     X_path = features_dir / "X.npy"
     y_path = features_dir / "y.npy"
-    meta = json.load(open(features_dir / "meta.json"))
+    meta = validate_features(features_dir)
     total = int(meta["total_epochs"])
     split_map = meta["splits"]
     train_idx = split_map["train"]
     val_idx = split_map["val"]
-    test_idx = split_map["test"]
 
     # build datasets
     train_dataset = MemmapDataset(str(X_path), str(y_path), train_idx)
     val_dataset = MemmapDataset(str(X_path), str(y_path), val_idx)
-    test_dataset = MemmapDataset(str(X_path), str(y_path), test_idx)
 
     # weighted sampler for training to balance classes
     y_all = np.memmap(str(y_path), mode='r', dtype='int8', shape=(total,))
     # compute per-sample weights (inverse freq)
-    class_counts = np.bincount(y_all.astype(np.int64), minlength=2)
+    class_counts = np.bincount(y_all[train_idx].astype(np.int64), minlength=2)
     class_weights = {0: 1.0, 1: 1.0}
-    if class_counts[1] > 0:
+    if np.all(class_counts > 0):
         class_weights = {0: float(class_counts.sum())/class_counts[0], 1: float(class_counts.sum())/class_counts[1]}
     sample_weights = np.array([class_weights[int(y_all[idx])] for idx in train_idx], dtype=np.float32)
     sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_idx), replacement=True)
@@ -188,7 +187,6 @@ def main(args):
     pin = (device.type == "cuda")
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, sampler=sampler, num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=pin)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=pin)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=pin)
 
     # model
     model = SimpleCNN(in_channels=1, n_classes=1, base_filters=args.base_filters, dropout=args.dropout).to(device)
@@ -203,12 +201,17 @@ def main(args):
     epochs_no_improve = 0
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
+    history = []
     for epoch in range(1, args.epochs+1):
         print(f"Epoch {epoch}/{args.epochs}")
         train_loss, train_acc, train_f1, train_auc = train_one_epoch(model, train_loader, optimizer, device, scaler, criterion, clip_grad=args.clip_grad)
         val_loss, val_acc, val_f1, val_auc = validate(model, val_loader, device, criterion)
         print(f" train: loss={train_loss:.4f} acc={train_acc:.4f} f1={train_f1:.4f} auc={train_auc:.4f}")
         print(f"  val : loss={val_loss:.4f} acc={val_acc:.4f} f1={val_f1:.4f} auc={val_auc:.4f}")
+
+        history.append(dict(epoch=epoch, train_loss=train_loss, train_f1=train_f1,
+                            val_loss=val_loss, val_f1=val_f1, val_auc=val_auc))
+        (checkpoint_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
 
         # scheduler step
         scheduler.step()
@@ -217,6 +220,8 @@ def main(args):
         torch.save({
             "epoch": epoch,
             "model_state": model.state_dict(),
+            "preprocessing": {k: meta[k] for k in ("sr", "n_mels", "n_fft", "hop_length", "train_mean", "train_std", "epoch_sec")},
+            "model_config": {"base_filters": args.base_filters, "dropout": args.dropout},
             "optimizer_state": optimizer.state_dict(),
             "val_f1": val_f1
         }, Path(args.checkpoint_dir) / "last.pt")
@@ -227,6 +232,8 @@ def main(args):
             torch.save({
                 "epoch": epoch,
                 "model_state": model.state_dict(),
+                "preprocessing": {k: meta[k] for k in ("sr", "n_mels", "n_fft", "hop_length", "train_mean", "train_std", "epoch_sec")},
+                "model_config": {"base_filters": args.base_filters, "dropout": args.dropout},
                 "optimizer_state": optimizer.state_dict(),
                 "val_f1": val_f1
             }, Path(args.checkpoint_dir) / "best.pt")
@@ -241,12 +248,7 @@ def main(args):
             print(f"Stopping early after {epoch} epochs (patience={args.patience})")
             break
 
-    # final evaluation on test set with best model
-    print("Loading best model for final test eval...")
-    ckpt = torch.load(Path(args.checkpoint_dir) / "best.pt", map_location=device)
-    model.load_state_dict(ckpt["model_state"])
-    test_loss, test_acc, test_f1, test_auc = validate(model, test_loader, device, criterion)
-    print(f"TEST : loss={test_loss:.4f} acc={test_acc:.4f} f1={test_f1:.4f} auc={test_auc:.4f}")
+    print("Training complete. Tune on validation, then run evaluate.py on the held-out test split.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -29,12 +29,15 @@ class RunningStats:
     def push(self, x: np.ndarray):
         # x: numpy array of values (flattened)
         x = np.asarray(x, dtype=np.float64).ravel()
-        for val in x:
-            self.n += 1
-            delta = val - self.mean
-            self.mean += delta / self.n
-            delta2 = val - self.mean
-            self.M2 += delta * delta2
+        if x.size == 0:
+            return
+        batch_mean = float(x.mean())
+        batch_m2 = float(np.sum((x - batch_mean) ** 2))
+        count = self.n + x.size
+        delta = batch_mean - self.mean
+        self.M2 += batch_m2 + delta * delta * self.n * x.size / count
+        self.mean += delta * x.size / count
+        self.n = count
     def get(self) -> Tuple[float,float]:
         if self.n < 2:
             return float(self.mean), float(1.0)
@@ -48,8 +51,10 @@ def build_subject_splits(subject_dirs, seed=42, ratios=(0.8, 0.1, 0.1)):
     rng.shuffle(subjects)
 
     n = len(subjects)
-    n_train = int(n * ratios[0])
-    n_val = int(n * ratios[1])
+    if n < 3:
+        raise ValueError("At least three subjects with epochs are required for train/val/test")
+    n_train = min(n - 2, max(1, int(n * ratios[0])))
+    n_val = min(n - n_train - 1, max(1, int(n * ratios[1])))
 
     train_subs = set(subjects[:n_train])
     val_subs = set(subjects[n_train:n_train+n_val])
@@ -58,11 +63,7 @@ def build_subject_splits(subject_dirs, seed=42, ratios=(0.8, 0.1, 0.1)):
     return train_subs, val_subs, test_subs
 
 # Mel computation
-def compute_log_mel(epoch_wave: np.ndarray, sr: int, n_mels: int, n_fft: int, hop_length: int) -> np.ndarray:
-    # Returns float32 (n_mels, T) (log-power dB)
-    S = librosa.feature.melspectrogram(y=epoch_wave, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels, power=2.0)
-    S_db = librosa.power_to_db(S, ref=np.max)
-    return S_db.astype(np.float32)
+from preprocessing import compute_log_mel
 
 # Main workflow
 def find_subject_dirs(processed_dir: Path) -> List[Path]:
@@ -79,8 +80,10 @@ def read_labels_csv(path: Path) -> np.ndarray:
             # label assumed at index of 'label' column
             try:
                 lbl = int(row[-1])
-            except Exception:
-                lbl = 0
+            except (ValueError, IndexError) as exc:
+                raise ValueError(f"{path}: invalid label row {row}") from exc
+            if lbl not in (0, 1):
+                raise ValueError(f"{path}: label must be 0 or 1")
             labels.append(lbl)
     return np.asarray(labels, dtype=np.int8)
 
@@ -121,6 +124,8 @@ def main(processed_dir: str = "data/processed",
          seed: int = 42):
     processed_dir = Path(processed_dir)
     out_dir = Path(out_dir)
+    if any((out_dir / name).exists() for name in ("X.npy", "y.npy", "meta.json")):
+        raise ValueError("Output artifacts already exist; use a new --out_dir to preserve them")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) build index map
@@ -130,7 +135,7 @@ def main(processed_dir: str = "data/processed",
     print(f"Found {total_n} epochs across {len(set([m[0] for m in mapping]))} subjects.")
 
     # 2) build splits
-    subject_dirs = find_subject_dirs(processed_dir)
+    subject_dirs = sorted({subj for subj, _ in mapping})
     train_subs, val_subs, test_subs = build_subject_splits(subject_dirs, seed=seed)
 
     train_idx, val_idx, test_idx = [], [], []
@@ -162,6 +167,8 @@ def main(processed_dir: str = "data/processed",
         meta = json.load(open(subj_dir / "epoch_meta.json"))
         n_epochs = int(meta["n_epochs"])
         samples_per_epoch = int(meta["samples_per_epoch"])
+        if int(meta["sr"]) != sr:
+            raise ValueError(f"{subj_dir}: epoch sample rate {meta['sr']} does not match requested {sr}")
         if n_epochs <= 0:
             continue
         # reshape memmap if needed
@@ -189,11 +196,15 @@ def main(processed_dir: str = "data/processed",
 
     # 5) two-pass approach: write raw mels and compute running stats over train set
     stats = RunningStats()
+    train_index_set = set(train_idx)
+    label_cache = {}
     print("Pass 1/2: computing raw mels & training stats (running)...")
     for g_idx, (subj_dir, epoch_idx) in enumerate(tqdm(mapping, total=total_n)):
         meta = json.load(open(subj_dir / "epoch_meta.json"))
         n_epochs = int(meta["n_epochs"])
         samples_per_epoch = int(meta["samples_per_epoch"])
+        if int(meta["sr"]) != sr:
+            raise ValueError(f"{subj_dir}: epoch sample rate {meta['sr']} does not match requested {sr}")
         # load memmap and reshape
         epochs_mm = np.memmap(str(subj_dir / "epochs.npy"), mode="r", dtype="float32", shape=(n_epochs, samples_per_epoch))
         wav = np.array(epochs_mm[epoch_idx], dtype=np.float32)
@@ -201,11 +212,15 @@ def main(processed_dir: str = "data/processed",
         # store raw mel
         X_mm[g_idx, 0, :, :] = mel
         # read label
-        labels = read_labels_csv(subj_dir / "labels.csv")
-        lbl = int(labels[epoch_idx]) if epoch_idx < len(labels) else 0
+        if subj_dir not in label_cache:
+            label_cache[subj_dir] = read_labels_csv(subj_dir / "labels.csv")
+        labels = label_cache[subj_dir]
+        if len(labels) != n_epochs:
+            raise ValueError(f"{subj_dir}: label count does not match epoch count")
+        lbl = int(labels[epoch_idx])
         y_mm[g_idx] = lbl
         # if this example is in training set, update running stats
-        if g_idx in train_idx:
+        if g_idx in train_index_set:
             stats.push(mel)  # flatten inside push
 
     # finalize train mean/std

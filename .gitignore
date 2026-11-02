@@ -10,6 +10,9 @@ env/
 data/raw/
 data/processed/
 data/features/
+data/repaired-*/
+evaluation/
+*.log
 
 # Models
 checkpoints/

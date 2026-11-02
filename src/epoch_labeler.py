@@ -137,107 +137,25 @@ def parse_hhmmss_to_seconds(s):
             return None
 
 def read_annotations_csv(csv_path: Path):
-    """
-    Robustly read an annotation CSV and return list of dicts:
-      [{onset: seconds, duration: seconds, label: str}, ...]
-    """
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        df = pd.read_csv(csv_path, encoding="latin1")
-    cols = {c.lower(): c for c in df.columns}
-    onset_col = None
-    dur_col = None
-    label_col = None
-    for cand in ["start","start_time","onset","time","begin","start_time"]:
-        if cand in cols:
-            onset_col = cols[cand]; break
-    for cand in ["duration","dur","length"]:
-        if cand in cols:
-            dur_col = cols[cand]; break
-    for cand in ["event","event_name","type","label","annotation","description"]:
-        if cand in cols:
-            label_col = cols[cand]; break
+    from annotations import read_events
+    return read_events(csv_path)
 
-    events = []
-    for _, row in df.iterrows():
-        try:
-            raw_on = row[onset_col] if onset_col else None
-            onset = parse_hhmmss_to_seconds(raw_on)
-            if onset is None:
-                continue
-            dur = 0.0
-            if dur_col:
-                dv = row[dur_col]
-                try:
-                    dur = float(dv)
-                except Exception:
-                    dur = 0.0
-            lbl = ""
-            if label_col:
-                lbl = str(row[label_col])
-            else:
-                for c in df.columns:
-                    if df[c].dtype == object:
-                        lbl = str(row[c]); break
-            events.append({"onset": float(onset), "duration": float(dur), "label": lbl})
-        except Exception:
-            continue
-    return events
 
 def choose_time_delay_sign(sync_dict: dict, ann_onsets: list, audio_duration: float):
+    """Accept only an explicit signed offset in seconds; never infer direction.
+
+    Convention: audio_onset = annotation_onset + offset_seconds.
+    Empty arrays, delay vectors and undocumented MAT fields require review.
     """
-    Find candidate numeric time_delay and choose + or - sign by maximizing onsets inside audio.
-    Returns (td_number, sign, stats).
-    sign = "+" or "-" or None.
-    """
-    if not sync_dict or not isinstance(sync_dict, dict):
-        return 0.0, None, {"reason": "no_sync"}
+    value = sync_dict.get("offset_seconds") if isinstance(sync_dict, dict) else None
+    if value is None or np.asarray(value).size != 1:
+        raise ValueError("Unverified synchronization: supply a verified scalar offset_seconds "
+                         "(audio time = annotation time + offset); zero must also be explicit")
+    offset = float(np.asarray(value).item())
+    if not math.isfinite(offset):
+        raise ValueError("offset_seconds must be finite")
+    return offset, "+", {"reason": "explicit_offset_seconds"}
 
-    lower_map = {k.lower(): v for k,v in sync_dict.items()}
-
-    # candidate keys to try
-    candidates = []
-    for key_name in ["time_delay", "timedelay", "timeoffset", "offset", "time_offset", "sync_offset", "audio_start", "annotation_start", "t0"]:
-        if key_name.lower() in lower_map:
-            candidates.append(lower_map[key_name.lower()])
-
-    # fallback: any numeric scalar value
-    if not candidates:
-        for k, v in lower_map.items():
-            num = to_number(v)
-            if num is not None:
-                candidates.append(v)
-                break
-
-    if not candidates:
-        return 0.0, None, {"reason": "no_numeric_candidate"}
-
-    td_num = to_number(candidates[0])
-    if td_num is None:
-        return 0.0, None, {"reason": "candidate_not_numeric"}
-
-    def score_for(sign):
-        mapped = [t + (td_num if sign=="+" else -td_num) for t in ann_onsets]
-        inside = sum(1 for m in mapped if (0.0 <= m <= audio_duration))
-        negative = sum(1 for m in mapped if m < 0.0)
-        too_far = sum(1 for m in mapped if m > audio_duration)
-        return {"inside": inside, "negative": negative, "too_far": too_far, "mapped_sample_count": len(mapped)}
-
-    plus_stats = score_for("+")
-    minus_stats = score_for("-")
-
-    # prefer sign with more inside hits; tie-breakers: fewer negatives, fewer too_far
-    if plus_stats["inside"] > minus_stats["inside"]:
-        return td_num, "+", {"plus": plus_stats, "minus": minus_stats}
-    if minus_stats["inside"] > plus_stats["inside"]:
-        return td_num, "-", {"plus": plus_stats, "minus": minus_stats}
-    if plus_stats["negative"] < minus_stats["negative"]:
-        return td_num, "+", {"plus": plus_stats, "minus": minus_stats}
-    if minus_stats["negative"] < plus_stats["negative"]:
-        return td_num, "-", {"plus": plus_stats, "minus": minus_stats}
-    # default to "+"
-    return td_num, "+", {"plus": plus_stats, "minus": minus_stats, "note": "tie_default_plus"}
 
 def map_ann_to_audio_time(ann_onset: float, td: float, sign):
     if sign is None:
@@ -290,6 +208,8 @@ def create_epochs_and_labels(subject_meta: dict, processed_dir: str, epoch_sec: 
         raise ValueError(f"Invalid audio_duration_sec for subject {subj}: {subject_meta.get('audio_duration_sec')}")
 
     out_dir = Path(processed_dir) / subj
+    if any((out_dir / name).exists() for name in ("epochs.npy", "labels.csv", "epoch_meta.json")):
+        raise ValueError(f"{out_dir}: epoch outputs already exist; use a new processed directory")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # load sync info if available
@@ -299,19 +219,18 @@ def create_epochs_and_labels(subject_meta: dict, processed_dir: str, epoch_sec: 
 
     # load annotations
     ann_events = []
+    if not subject_meta.get("annotations_csv") or pd.isna(subject_meta.get("annotations_csv")):
+        raise ValueError(f"Missing annotations for {subj}; refusing to create negative labels")
     if subject_meta.get("annotations_csv") and (not pd.isna(subject_meta.get("annotations_csv"))):
         ann_events = read_annotations_csv(Path(subject_meta["annotations_csv"]))
 
     ann_onsets = [e["onset"] for e in ann_events]
 
-    # choose time delay and sign
-    chosen_td = 0.0
-    chosen_sign = None
-    stats = {}
-    if sync_info and isinstance(sync_info, dict):
-        chosen_td, chosen_sign, stats = choose_time_delay_sign(sync_info, ann_onsets, duration)
-    else:
-        chosen_td, chosen_sign, stats = 0.0, None, {"reason": "no_sync"}
+    # A manifest offset is an explicit override of undocumented MAT contents.
+    offset = subject_meta.get("offset_seconds")
+    if offset is not None and not pd.isna(offset):
+        sync_info = {"offset_seconds": offset}
+    chosen_td, chosen_sign, stats = choose_time_delay_sign(sync_info, ann_onsets, duration)
 
     # map events
     mapped_events = []
@@ -406,6 +325,7 @@ def create_epochs_and_labels(subject_meta: dict, processed_dir: str, epoch_sec: 
         "epoch_sec": float(epoch_sec),
         "total_annotations": len(ann_events),
         "mapped_events_preview": mapped_events[:10],
+        "alignment_source": subject_meta.get("alignment_source", "explicit offset_seconds"),
         "chosen_time_delay": chosen_td,
         "chosen_sign": chosen_sign,
         "chosen_sign_stats": stats
@@ -421,6 +341,7 @@ def main(manifest_csv: str, processed_dir: str, epoch_sec: float, overlap: float
     df = pd.read_csv(manifest_csv)
     processed_dir = Path(processed_dir)
 
+    failures = []
     for _, row in tqdm(df.iterrows(), total=len(df)):
         subj_meta = row.to_dict()
         # top-level coercion before passing to worker:
@@ -442,7 +363,10 @@ def main(manifest_csv: str, processed_dir: str, epoch_sec: float, overlap: float
         try:
             create_epochs_and_labels(subj_meta, processed_dir, epoch_sec=epoch_sec, overlap=overlap)
         except Exception as e:
+            failures.append(str(subj_meta.get("subject")))
             warnings.warn(f"ERROR subject {subj_meta.get('subject')}: {e}")
+    if failures:
+        raise RuntimeError(f"Epoch generation failed for {len(failures)} subjects: {failures}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

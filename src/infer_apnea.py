@@ -1,166 +1,122 @@
 #!/usr/bin/env python3
+"""Report positive audio windows using the model's training feature contract."""
+import argparse
 import json
 import sys
-import numpy as np
-import torch
 from pathlib import Path
-import soundfile as sf
-import librosa
 
-# add project root to python path so local modules import cleanly
+import librosa
+import numpy as np
+import soundfile as sf
+import torch
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
 from models.cnn import SimpleCNN
+from preprocessing import normalized_mel, validate_preprocessing
 
 
-# these constants should match the training setup
-SR = 4000
-EPOCH_SEC = 30
-N_MELS = 64
-N_FFT = 512
-HOP_LENGTH = 256
-
-def postprocess_events(timeline, epoch_sec=30, min_epochs=2):
-    """
-    timeline = list of dicts with keys:
-      start, end, prob, label (0/1)
-    Returns merged events + AHI
-    """
-    events = []
-    in_event = False
+def postprocess_events(timeline, epoch_sec=30, min_epochs=1):
+    """Merge adjacent positive windows into regions, not individual apnea events."""
+    regions = []
     current = None
-
     for row in timeline:
-        if row["label"] == 1:
-            if not in_event:
-                in_event = True
-                current = {
-                    "start": row["start"],
-                    "end": row["end"],
-                    "max_prob": row["prob"],
-                    "epochs": 1
-                }
+        if row['label'] == 1:
+            if current is None or row['start'] != current['end']:
+                if current is not None and current['epochs'] >= min_epochs:
+                    regions.append(current)
+                current = dict(start=row['start'], end=row['end'], max_prob=row['prob'], epochs=1)
             else:
-                current["end"] = row["end"]
-                current["max_prob"] = max(current["max_prob"], row["prob"])
-                current["epochs"] += 1
-        else:
-            if in_event:
-                if current["epochs"] >= min_epochs:
-                    events.append(current)
-                in_event = False
-                current = None
+                current['end'] = row['end']
+                current['max_prob'] = max(current['max_prob'], row['prob'])
+                current['epochs'] += 1
+        elif current is not None:
+            if current['epochs'] >= min_epochs:
+                regions.append(current)
+            current = None
+    if current is not None and current['epochs'] >= min_epochs:
+        regions.append(current)
+    return regions
 
-    if in_event and current["epochs"] >= min_epochs:
-        events.append(current)
 
-    return events
+def load_threshold(path=ROOT / 'config.json'):
+    value = json.loads(Path(path).read_text())['threshold']
+    if not isinstance(value, (int, float)) or not np.isfinite(value) or not 0 < value < 1:
+        raise ValueError('Threshold must be finite and between 0 and 1')
+    return value
 
-def load_threshold():
-    cfg = ROOT / "config.json"
-    if cfg.exists():
-        return json.load(open(cfg))["threshold"]
-    return 0.5
 
-def epoch_audio(audio, sr):
-    samples_per_epoch = int(EPOCH_SEC * sr)
-    epochs = []
-    for i in range(0, len(audio), samples_per_epoch):
-        seg = audio[i:i+samples_per_epoch]
-        if len(seg) < samples_per_epoch:
-            seg = np.pad(seg, (0, samples_per_epoch-len(seg)))
-        epochs.append(seg.astype(np.float32))
-    return epochs
+def epoch_audio(audio, sr, epoch_sec=30):
+    samples = int(round(epoch_sec * sr))
+    if samples <= 0 or len(audio) == 0:
+        raise ValueError('Audio must be nonempty and epoch duration positive')
+    for i in range(0, len(audio), samples):
+        segment = audio[i:i + samples]
+        yield np.pad(segment, (0, samples - len(segment))).astype(np.float32)
 
-def audio_to_mel(audio):
-    mel = librosa.feature.melspectrogram(
-        y=audio,
-        sr=SR,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        power=2.0
-    )
-    mel_db = librosa.power_to_db(mel, ref=np.max)
-    mel_db = (mel_db - mel_db.mean()) / (mel_db.std() + 1e-6)
-    return mel_db.astype(np.float32)
+
+def audio_to_mel(audio, metadata):
+    return normalized_mel(audio, metadata)
+
 
 @torch.no_grad()
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python src/infer_apnea.py <audio.wav>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('audio', type=Path)
+    parser.add_argument('--checkpoint', type=Path, default=ROOT / 'checkpoints/best.pt')
+    parser.add_argument('--metadata', type=Path, help='Matching training meta.json required for legacy checkpoints')
+    parser.add_argument('--config', type=Path, default=ROOT / 'config.json')
+    parser.add_argument('--cpu', action='store_true')
+    args = parser.parse_args()
+    try:
+        info = sf.info(str(args.audio))
+        if info.frames == 0:
+            raise ValueError('Audio file is empty')
+        device = torch.device('cpu' if args.cpu else 'cuda' if torch.cuda.is_available()
+                              else 'mps' if torch.backends.mps.is_available() else 'cpu')
+        checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
+        meta = checkpoint.get('preprocessing')
+        if args.metadata:
+            supplied = json.loads(args.metadata.read_text())
+            if meta is not None and any(supplied.get(k) != v for k, v in meta.items()):
+                raise ValueError('Supplied metadata conflicts with checkpoint preprocessing')
+            meta = supplied
+        if meta is None:
+            raise ValueError('Legacy checkpoint lacks preprocessing; provide its matching --metadata meta.json')
+        validate_preprocessing(meta)
+        threshold = load_threshold(args.config)
+        model = SimpleCNN(**checkpoint.get('model_config', {})).to(device)
+        model.load_state_dict(checkpoint['model_state'])
+        model.eval()
+        audio, sr = sf.read(str(args.audio), dtype='float32')
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if not np.all(np.isfinite(audio)):
+            raise ValueError('Audio contains nonfinite samples')
+        duration = len(audio) / sr
+        if sr != meta['sr']:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=meta['sr'])
+        timeline = []
+        for i, epoch in enumerate(epoch_audio(audio, meta['sr'], meta['epoch_sec'])):
+            feature = torch.from_numpy(audio_to_mel(epoch, meta))[None, None].to(device)
+            prob = torch.sigmoid(model(feature)).item()
+            timeline.append(dict(start=i * meta['epoch_sec'],
+                                 end=min((i + 1) * meta['epoch_sec'], duration),
+                                 prob=prob, label=int(prob >= threshold)))
+        regions = postprocess_events(timeline)
+        positive_seconds = sum(row['end'] - row['start'] for row in timeline if row['label'])
+        print('\n===== AUDIO WINDOW REPORT =====')
+        print(f'Recording duration: {duration:.2f} seconds')
+        print(f'Positive windows: {sum(row["label"] for row in timeline)} / {len(timeline)}')
+        print(f'Time in positive windows: {positive_seconds:.2f} seconds ({positive_seconds / duration:.1%})')
+        print(f'Positive regions: {len(regions)}')
+        print('AHI and severity are not estimated: window labels do not provide individual event counts or sleep time.')
+        for i, region in enumerate(regions, 1):
+            print(f'{i:3d}. {region["start"]:.1f}s - {region["end"]:.1f}s | peak p={region["max_prob"]:.3f}')
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        parser.exit(1, f'Inference failed: {exc}\n')
 
-    wav_path = Path(sys.argv[1])
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-    print("Using device:", device)
-    threshold = load_threshold()
-    print("Using threshold:", threshold)
-
-    model = SimpleCNN()
-    ckpt = torch.load(ROOT / "checkpoints/best.pt", map_location=device)
-    model.load_state_dict(ckpt["model_state"])
-    model.to(device)
-    model.eval()
-
-    audio, sr = sf.read(str(wav_path))
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-
-    if sr != SR:
-        print(f"WARNING: expected {SR}Hz, got {sr}Hz. Resampling...")
-        audio = librosa.resample(audio, orig_sr=sr, target_sr=SR)
-        sr = SR
-
-    epochs = epoch_audio(audio, sr)
-
-    print(f"Processing {len(epochs)} epochs...")
-
-    timeline = []
-
-    for i, ep in enumerate(epochs):
-        mel = audio_to_mel(ep)
-        X = torch.from_numpy(mel).unsqueeze(0).unsqueeze(0).to(device)
-        logits = model(X)
-        prob = torch.sigmoid(logits).item()
-
-        label = 1 if prob >= threshold else 0
-        start_sec = i * EPOCH_SEC
-        end_sec = start_sec + EPOCH_SEC
-
-        timeline.append({
-            "start": start_sec,
-            "end": end_sec,
-            "prob": prob,
-            "label": label
-        })
-
-    events = postprocess_events(timeline)
-
-    sleep_hours = (len(epochs) * EPOCH_SEC) / 3600
-    ahi = len(events) / sleep_hours
-
-    if ahi < 5:
-        severity = "Normal"
-    elif ahi < 15:
-        severity = "Mild"
-    elif ahi < 30:
-        severity = "Moderate"
-    else:
-        severity = "Severe"
-
-    print("\n===== SLEEP APNEA REPORT =====")
-    print(f"Total sleep time: {sleep_hours:.2f} hours")
-    print(f"Detected events: {len(events)}")
-    print(f"AHI: {ahi:.2f}")
-    print(f"Severity: {severity}")
-
-    print("\nEvents:")
-    for i, ev in enumerate(events, 1):
-        print(f"{i:3d}. {ev['start']:6.1f}s - {ev['end']:6.1f}s | peak p={ev['max_prob']:.3f}")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

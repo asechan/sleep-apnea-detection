@@ -68,65 +68,14 @@ def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 def read_annotations_csv(csv_path: Path) -> Dict[str, Any]:
-    """
-    Read an annotations CSV and return a normalized list of events:
-      [{"onset": float, "duration": float, "label": str, "raw_row": {...}}, ...]
-    If parsing fails, returns an 'error' key.
-    """
-    out = {"events": [], "n_events": 0}
+    """Use the same timestamp and schema rules as the epoch labeler."""
+    from annotations import read_events
     try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        try:
-            df = pd.read_csv(csv_path, encoding="latin1")
-        except Exception as e2:
-            return {"error": f"csv_read_error: {e} / {e2}"}
+        events = read_events(csv_path)
+        return {"events": events, "n_events": len(events)}
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc)}
 
-    if df.shape[0] == 0:
-        return {"events": [], "n_events": 0}
-
-    onset_col = find_column(df, POSSIBLE_ONSET_COLS)
-    dur_col = find_column(df, POSSIBLE_DURATION_COLS)
-    label_col = find_column(df, POSSIBLE_LABEL_COLS)
-
-    # If no duration column, try to infer from consecutive onset or set to 0
-    for idx, row in df.iterrows():
-        try:
-            onset = None
-            dur = 0.0
-            lbl = ""
-            if onset_col is not None:
-                onset = float(row[onset_col])
-            else:
-                # if there's a column named 'Event Time' or similar, we already tried; if none, skip
-                onset = None
-
-            if dur_col is not None:
-                dur = float(row[dur_col]) if not pd.isna(row[dur_col]) else 0.0
-            else:
-                dur = 0.0
-
-            if label_col is not None:
-                lbl = str(row[label_col])
-            else:
-                # fallback: try to find an "Event" like column in any string columns
-                # pick first non-numeric column
-                for c in df.columns:
-                    if df[c].dtype == object:
-                        lbl = str(row[c])
-                        break
-
-            if onset is None:
-                # skip rows we cannot parse onset for
-                continue
-
-            out["events"].append({"onset": float(onset), "duration": float(dur), "label": lbl, "raw_row": row.to_dict()})
-        except Exception:
-            # skip problematic row but record it later via diagnostics if needed
-            continue
-
-    out["n_events"] = len(out["events"])
-    return out
 
 def read_sync_mat(mat_path: Path) -> Dict[str, Any]:
     """
@@ -210,7 +159,7 @@ def map_annotation_time_to_audio_time(ann_time: float, sync_dict: Dict[str, Any]
 
 # ---------- Main manifest builder ----------
 
-def build_manifest_apsaa(raw_dir: str, out_csv: str, diag_json: str, processed_dir: str = "data/processed", verbose: bool = True) -> str:
+def build_manifest_apsaa(raw_dir: str, out_csv: str, diag_json: str, processed_dir: str = "data/processed", verbose: bool = True, already_synchronized: bool = False) -> str:
     raw = Path(raw_dir)
     if not raw.exists():
         raise FileNotFoundError(f"raw_dir not found: {raw}")
@@ -237,6 +186,10 @@ def build_manifest_apsaa(raw_dir: str, out_csv: str, diag_json: str, processed_d
             "mapped_annotation_preview": [],  # small sample of mapped events
         }
 
+        if already_synchronized:
+            row["offset_seconds"] = 0.0
+            row["alignment_source"] = "Unmodified synchronized APSAA release; confirmed by dataset owner"
+
         # find audio
         aud = None
         for ext in AUDIO_EXTS:
@@ -247,7 +200,7 @@ def build_manifest_apsaa(raw_dir: str, out_csv: str, diag_json: str, processed_d
         if aud is None:
             # fallback: any wav/m4a/mp3 in folder
             for p in subj_dir.iterdir():
-                if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+                if not p.name.startswith(".") and p.is_file() and p.suffix.lower() in AUDIO_EXTS:
                     aud = p
                     break
 
@@ -273,13 +226,13 @@ def build_manifest_apsaa(raw_dir: str, out_csv: str, diag_json: str, processed_d
         # find annotations CSV (look for *Annotation*.csv)
         ann_csv = None
         for p in subj_dir.iterdir():
-            if p.is_file() and "annot" in p.name.lower() and p.suffix.lower() == ".csv":
+            if not p.name.startswith(".") and p.is_file() and "annot" in p.name.lower() and p.suffix.lower() == ".csv":
                 ann_csv = p
                 break
         if ann_csv is None:
             # fallback: file that contains 'Annotation' or 'Annotations' or maybe 'events'
             for p in subj_dir.iterdir():
-                if p.is_file() and p.suffix.lower() == ".csv":
+                if not p.name.startswith(".") and p.is_file() and p.suffix.lower() == ".csv":
                     name = p.name.lower()
                     if "annotation" in name or "event" in name or "annot" in name:
                         ann_csv = p
@@ -306,7 +259,7 @@ def build_manifest_apsaa(raw_dir: str, out_csv: str, diag_json: str, processed_d
         sync_mat = subj_dir / "sync_output.mat"
         if not sync_mat.exists():
             # try other mat files
-            mats = [p for p in subj_dir.iterdir() if p.is_file() and p.suffix.lower() == ".mat"]
+            mats = [p for p in subj_dir.iterdir() if not p.name.startswith(".") and p.is_file() and p.suffix.lower() == ".mat"]
             if mats:
                 sync_mat = mats[0]
             else:
@@ -370,7 +323,8 @@ if __name__ == "__main__":
     parser.add_argument("--out_csv", type=str, default="data/manifest_apsaa.csv", help="Output manifest CSV path")
     parser.add_argument("--diag", type=str, default="data/diagnostics_apsaa.json", help="Diagnostics JSON output")
     parser.add_argument("--processed_dir", type=str, default="data/processed", help="Processed output dir for per-subject metadata")
+    parser.add_argument("--already_synchronized", action="store_true", help="Confirm unmodified synchronized APSAA release; record zero additional offset")
     parser.add_argument("--quiet", action="store_true", help="less stdout")
     args = parser.parse_args()
 
-    build_manifest_apsaa(args.raw_dir, args.out_csv, args.diag, processed_dir=args.processed_dir, verbose=(not args.quiet))
+    build_manifest_apsaa(args.raw_dir, args.out_csv, args.diag, processed_dir=args.processed_dir, verbose=(not args.quiet), already_synchronized=args.already_synchronized)
