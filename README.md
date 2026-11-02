@@ -185,7 +185,6 @@ Do not load these files with `numpy.load`; use the project metadata and loaders.
 │   ├── test_threshold.py
 │   └── test_training.py
 ├── requirements.txt
-├── FIX_PLAN.md                 # Repair history and validation notes
 └── README.md
 ```
 
@@ -417,7 +416,8 @@ For a reproducible local run, preserve:
 4. The checkpoint, run metadata, and threshold configuration.
 5. The evaluation report and command-line arguments.
 
-See [FIX_PLAN.md](FIX_PLAN.md) for the repair history and known decisions.
+The validation decisions and experiment details are documented in this README
+and in the generated evaluation artifacts when a local experiment is run.
 
 ## Limitations
 
